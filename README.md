@@ -5,4 +5,4 @@ A gentle sample for Apache Airflow
 1. Install <b>Docker</b> and enable <b>docker-compose</b> 
 2. Build the images and run docker containers by
 <br>
-`docker-compose up --build`
+```docker-compose up --build```
