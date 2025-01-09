@@ -6,6 +6,7 @@ from datetime import (
 import environs
 from airflow.decorators import task
 from redis.client import Redis
+from redis.exceptions import ResponseError
 
 env = environs.Env()
 env.read_env()
@@ -13,37 +14,56 @@ env.read_env()
 REDIS_HOST = env.str("DATABASE_REDIS_HOST")
 REDIS_PORT = env.int("DATABASE_REDIS_PORT")
 
-DATETIME_FORMAT = '%Y-%m-%d %H-%M'
+DATETIME_FORMAT = "%Y-%m-%d %H-%M"
+
+
+def ensure_trends_path(redis_client):
+    try:
+        # Check if the "movies" key exists
+        movies_data = redis_client.json().get("movies")
+        if not movies_data or "trends" not in movies_data:
+            # If "movies" or "trends" path does not exist, set it
+            redis_client.json().set("movies", "$", {"trends": []})
+    except ResponseError as e:
+        print(f"Error while ensuring trends path: {e}")
+
+
+def ensure_standings_path(redis_client):
+    try:
+        # Check if the "movies" key exists
+        movies_data = redis_client.json().get("movies")
+        if not movies_data or "standings" not in movies_data:
+            # If "movies" or "trends" path does not exist, set it
+            redis_client.json().set("movies", "$", {"standings": []})
+    except ResponseError as e:
+        print(f"Error while ensuring trends path: {e}")
 
 
 @task(task_id="store-movies-trend", retries=10, retry_delay=timedelta(seconds=1))
 def save_trend(xcom_data_key, **kwargs):
-    ti = kwargs['task_instance']
+    ti = kwargs["task_instance"]
 
-    redis_client = Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+    redis_client = Redis(host=REDIS_HOST, port=REDIS_PORT, db=1)
 
     movies = ti.xcom_pull(task_ids="get-movies", key=xcom_data_key)
     print(movies)
 
-    # set movies root if not added yet
-    redis_client.json().set(name="movies", path="$.trends", obj=[], nx=True)
+    ensure_trends_path(redis_client)
 
     time_stamp = datetime.now().strftime(DATETIME_FORMAT)
     redis_client.json().arrappend(
-        "movies",
-        "$.trends",
-        {"{}".format(time_stamp): movies}
+        "movies", "$.trends", {"{}".format(time_stamp): movies}
     )
 
 
 @task(task_id="update-movies-standing", retries=10, retry_delay=timedelta(seconds=1))
 def update_standings(xcom_result_key, **kwargs):
-    ti = kwargs['task_instance']
+    ti = kwargs["task_instance"]
 
     redis_client = Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
 
     # create movies_standings if not existed
-    print(redis_client.json().set(name="movies", path="$.standings", obj=[], nx=True))
+    ensure_standings_path(redis_client)
     print("Standings created if not existed!")
     print(redis_client.json().get("movies", "$.standings"))
 
@@ -74,11 +94,7 @@ def update_standings(xcom_result_key, **kwargs):
                 standing = movie["movie_standing"]
                 title = movie["movie_title"]
                 print(standing, title)
-                redis_client.json().arrappend(
-                    "movies",
-                    f"$.standings",
-                    title
-                )
+                redis_client.json().arrappend("movies", f"$.standings", title)
                 print("Added!")
                 print(redis_client.json().get("movies", "$.standings"))
         else:
@@ -89,14 +105,20 @@ def update_standings(xcom_result_key, **kwargs):
                 last_title = last_movie_standings[i]
 
                 if last_title != current_title:
-                    redis_client.json().set("movies", f"$.standings[{i}]", current_title)
-                    print(f"Updated movie rank [{i + 1}]: {last_title} -> {current_title}")
+                    redis_client.json().set(
+                        "movies", f"$.standings[{i}]", current_title
+                    )
+                    print(
+                        f"Updated movie rank [{i + 1}]: {last_title} -> {current_title}"
+                    )
 
                     # add to notify queue
-                    standings_changes.append({
-                        "standing": i,
-                        "previous": last_title,
-                        "current": current_title,
-                    })
+                    standings_changes.append(
+                        {
+                            "standing": i,
+                            "previous": last_title,
+                            "current": current_title,
+                        }
+                    )
     print(standings_changes)
     ti.xcom_push(key=xcom_result_key, value=standings_changes)
